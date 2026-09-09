@@ -23,6 +23,7 @@ from vllm_omni.engine.duplex.runtime import (
 )
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.runtime import (
     MiniCPMO45DuplexRuntimeExtension,
+    _duplex_hd_slice_count,
     build_duplex_data_plane_prompt,
     duplex_scheduler_token_budget,
 )
@@ -529,6 +530,30 @@ def test_duplex_scheduler_token_budget_matches_stage0_hd_slicing(base_size, expe
     pair = duplex_scheduler_token_budget(_pcm_unit_payload([_jpeg_b64(*base_size), _jpeg_b64(448, 448)]))
 
     assert pair - audio_only == expected_blocks * 66
+
+
+@pytest.mark.parametrize(
+    ("size", "expected_patches"),
+    [
+        # multiple = min(ceil(w * h / 448**2), max_slice_nums); <= 1 is never sliced.
+        ((448, 448), 0),  # exactly one tile
+        ((320, 240), 0),  # smaller than one tile
+        ((447, 449), 0),  # just under one tile
+        ((449, 449), 2),  # just over: the processor cuts a 2-tile grid
+        ((640, 360), 2),
+        ((960, 540), 2),  # official camera frame
+        ((540, 960), 2),  # same frame rotated
+        ((1920, 1080), 2),  # capped by max_slice_nums=2, not by area
+    ],
+)
+def test_duplex_hd_slice_count_matches_official_grid(size, expected_patches):
+    """Lock the port of ``MiniCPMVImageProcessor.get_sliced_grid``.
+
+    Stage0 slices a stacked unit with ``max_slice_nums=[2, 1]``, so the patch
+    count for the base frame decides the scheduler budget. A frame that fits one
+    ``scale_resolution=448`` tile is not sliced at all.
+    """
+    assert _duplex_hd_slice_count(size, 2) == expected_patches
 
 
 def test_duplex_scheduler_token_budget_unreadable_base_frame_keeps_hd_fallback():
