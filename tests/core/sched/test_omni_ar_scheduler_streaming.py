@@ -18,6 +18,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.engine import FinishReason
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm_omni.core.sched.omni_ar_scheduler import OmniARAsyncScheduler, OmniARScheduler
 from vllm_omni.distributed.omni_connectors.transfer_adapter.chunk_transfer_adapter import (
@@ -1021,6 +1022,67 @@ def test_stage0_streaming_update_overflow_counts_an_uncomputed_prompt() -> None:
     assert session.prompt_token_ids == [1, 2, 3]
     sched.finish_requests.assert_called_once()
     assert "5 tokens" in sched._streaming_context_overflow[session.request_id][1]
+
+
+def _make_admission_scheduler(*, max_model_len: int) -> OmniARScheduler:
+    """A scheduler with real admission queues, so nothing about the terminal
+    handling below is mocked away except block freeing."""
+    sched = _make_scheduler(stage_id=0)
+    sched.max_model_len = max_model_len
+    sched.policy = SchedulingPolicy.FCFS
+    sched.waiting = create_request_queue(sched.policy)
+    sched.skipped_waiting = create_request_queue(sched.policy)
+    sched.running = []
+    sched.requests = {}
+    sched._free_request = MagicMock()  # needs a KV manager; not what this covers
+    return sched
+
+
+def _make_queued_stop(session: Request, update: StreamingUpdate) -> None:
+    """Put the request in the state upstream hands to _handle_stopped_request:
+    an append that arrived during generation is queued, and the stop status is
+    still on the request."""
+    from collections import deque
+
+    session.resumable = True
+    session.streaming_queue = deque([update])
+    session.status = RequestStatus.FINISHED_STOPPED
+
+
+def test_queued_streaming_update_that_overflows_does_not_return_to_admission() -> None:
+    sched = _make_admission_scheduler(max_model_len=4)
+    session = _make_request()
+    sched.requests[session.request_id] = session
+    session.num_computed_tokens = 3
+    _make_queued_stop(session, _make_update([10, 20]))
+
+    finished = sched._handle_stopped_request(session)
+
+    assert finished is True
+    assert len(sched.waiting) == 0
+    assert len(sched.skipped_waiting) == 0
+    assert session.status == RequestStatus.FINISHED_ERROR
+    assert session.resumable is False
+    assert "context_length_exceeded: " in sched._streaming_context_overflow[session.request_id][1]
+    # update_from_output frees every request reported as finished; freeing here
+    # as well deleted it from self.requests twice (KeyError in _free_blocks).
+    sched._free_request.assert_not_called()
+
+
+def test_queued_streaming_update_that_fits_still_resumes_the_session() -> None:
+    sched = _make_admission_scheduler(max_model_len=64)
+    session = _make_request()
+    sched.requests[session.request_id] = session
+    session.num_computed_tokens = 3
+    _make_queued_stop(session, _make_update([10, 20]))
+
+    finished = sched._handle_stopped_request(session)
+
+    assert finished is False
+    assert len(sched.waiting) == 1
+    assert session.status == RequestStatus.WAITING
+    assert not getattr(sched, "_streaming_context_overflow", {})
+    sched._free_request.assert_not_called()
 
 
 def test_context_overflow_emits_an_error_output_with_the_reason() -> None:

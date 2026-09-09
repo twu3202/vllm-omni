@@ -943,8 +943,52 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
         if overflow is None:
             overflow = self._streaming_context_overflow = {}
         overflow[session.request_id] = (int(getattr(session, "client_index", 0) or 0), reason)
+        if session.is_finished():
+            # Reached from ``_handle_stopped_request`` with a queued update.
+            # ``update_from_output`` frees every request that call reports as
+            # finished, so finishing the session here too would free it twice.
+            # ``_handle_stopped_request`` below takes it out of admission and
+            # leaves the single free to the caller.
+            return True
         self.finish_requests((session.request_id,), RequestStatus.FINISHED_ERROR)
         return True
+
+    def _handle_stopped_request(self, request: Request) -> bool:
+        """Do not resume a session whose queued update overflowed the model.
+
+        Upstream pops one queued ``StreamingUpdate``, applies it through
+        ``_update_request_as_session`` and then re-enqueues the request
+        unconditionally. When that update overflows, the request must not go
+        back into the waiting queue: it is terminal, and admission raises
+        ``RuntimeError: Invalid request status`` on anything that is neither
+        WAITING nor PREEMPTED, which would kill the EngineCore this guard
+        exists to keep alive.
+        """
+        overflow = getattr(self, "_streaming_context_overflow", None)
+        overflowed_before = bool(overflow) and request.request_id in overflow
+        finished = super()._handle_stopped_request(request)
+        if finished or overflowed_before:
+            return finished
+        overflow = getattr(self, "_streaming_context_overflow", None)
+        if not overflow or request.request_id not in overflow:
+            return finished
+        self._finish_overflowed_streaming_session(request)
+        return True
+
+    def _finish_overflowed_streaming_session(self, request: Request) -> None:
+        """Take a terminal session back out of admission.
+
+        Queues and status only. ``update_from_output`` frees every request
+        ``_handle_stopped_request`` reports as finished, so freeing here as
+        well deletes it from ``self.requests`` twice (``KeyError`` in
+        ``_free_blocks``) and skips the caller's input-coordinator cleanup.
+        """
+        self.waiting.remove_requests((request,))
+        self.skipped_waiting.remove_requests((request,))
+        if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+            self.num_waiting_for_streaming_input -= 1
+        request.status = RequestStatus.FINISHED_ERROR
+        request.resumable = False
 
     def _emit_streaming_context_overflow_outputs(self, outputs: dict[int, list[EngineCoreOutput]]) -> None:
         """Turn recorded context overflows into explicit error outputs.
