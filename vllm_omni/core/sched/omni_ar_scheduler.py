@@ -911,6 +911,15 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
         grows by tens to hundreds of tokens per second of input, so long
         sessions reach this point in normal use.
 
+        A prompt that fills the model exactly is over the line as well: the
+        session samples at least one listen/speak token after every append,
+        and upstream's running-request budget
+        ``max_model_len - num_computed_tokens - num_sampled_tokens_per_step``
+        then goes negative, which the ``num_new_tokens == 0`` guard in
+        ``schedule()`` does not catch (``allocate_slots`` dies, or the worker
+        asserts ``max_model_len + 1`` sampled positions). So the extended
+        prompt must leave room for the tokens sampled in one step.
+
         The update is dropped and only this request is finished, right here:
         a parked session does not make the engine schedule, so deferring the
         finish to the next ``schedule()`` would leave the client waiting. The
@@ -928,11 +937,15 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
         # tokens upstream keeps, then the update: num_computed_tokens covers
         # both when the prompt was fully computed.
         projected = max(int(session.num_prompt_tokens), int(session.num_computed_tokens)) + new_tokens
-        if projected <= int(max_model_len):
+        # Room for the tokens one step samples on top of the prompt (1 without
+        # speculative decoding). __new__-built test schedulers carry no
+        # num_sampled_tokens_per_step.
+        sample_room = max(1, int(getattr(self, "num_sampled_tokens_per_step", 1) or 1))
+        if projected + sample_room <= int(max_model_len):
             return False
         reason = (
             f"{self.STREAMING_CONTEXT_OVERFLOW_STOP_REASON}: streaming session prompt would grow to "
-            f"{projected} tokens, above max_model_len {int(max_model_len)}"
+            f"{projected} tokens, leaving no room to sample within max_model_len {int(max_model_len)}"
         )
         logger.error(
             "[Omni] %s: %s; finishing the request instead of extending it",
@@ -962,16 +975,18 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
         back into the waiting queue: it is terminal, and admission raises
         ``RuntimeError: Invalid request status`` on anything that is neither
         WAITING nor PREEMPTED, which would kill the EngineCore this guard
-        exists to keep alive.
+        exists to keep alive. The same holds for a session whose overflow was
+        recorded before this call and that upstream still reports as resumed.
         """
-        overflow = getattr(self, "_streaming_context_overflow", None)
-        overflowed_before = bool(overflow) and request.request_id in overflow
         finished = super()._handle_stopped_request(request)
-        if finished or overflowed_before:
-            return finished
+        if finished:
+            return True
         overflow = getattr(self, "_streaming_context_overflow", None)
         if not overflow or request.request_id not in overflow:
-            return finished
+            return False
+        # Whether the overflow was recorded by this call's queued update or
+        # earlier makes no difference: a session in the overflow map is
+        # terminal, and upstream has just put it back into admission.
         self._finish_overflowed_streaming_session(request)
         return True
 
