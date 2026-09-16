@@ -4,11 +4,15 @@
 """The engine-side Silero VAD: backend selection and endpoint rules.
 
 The endpoint rules are the part worth pinning hardest. They were reimplemented
-when turn detection moved into the engine, and drifted from upstream's
-``ThresholdEndpointPolicy`` in two ways that only show up mid-utterance: a loud
-frame used to cancel an in-progress silence timer, and ``audio_end_ms`` used to
-exclude the trailing silence OpenAI says it should include. The parity cases
-below hold upstream's own outputs, so neither can come back unnoticed.
+when turn detection moved into the engine, and the reimplementation has to keep
+three bands apart, not two: below ``threshold - 0.15`` a turn may end, at or
+above ``threshold`` the speaker is plainly still going and any pending endpoint
+is cancelled, and in between the endpoint clock keeps running but cannot fire.
+Collapse the top two bands and a breath pause followed by a second of clear
+speech commits the turn on the next quiet frame. ``audio_end_ms`` is the other
+rule that has drifted: OpenAI counts the trailing silence, an earlier version
+did not. The parity cases below hold the outputs of the serving-side policy this
+replaced, so neither can come back unnoticed.
 """
 
 from __future__ import annotations
@@ -59,8 +63,8 @@ def _drive(config: SileroVADConfig, probabilities: list[float]) -> list[tuple[st
 
 #: Probability sequences with the endpoint events upstream's
 #: ``ThresholdEndpointPolicy`` produced for them, captured from
-#: ``entrypoints/duplex/server_vad.py`` at `e2d2617f` before that module was
-#: removed. Golden rather than computed because the oracle no longer ships: the
+#: ``entrypoints/duplex/server_vad.py`` at ``99ff4f307~1``, the commit before
+#: that module was removed. Golden rather than computed because the oracle no longer ships: the
 #: serving layer is transport only, so the VAD it used to carry is gone. Any
 #: drift in the engine's rules still breaks these.
 _PARITY_CASES = {
@@ -74,10 +78,15 @@ _PARITY_CASES = {
         {"threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 64, "min_speech_duration_ms": 32},
         [("start", 0), ("stop", 160)],
     ),
-    "loud frames inside the silence timer": (
+    "hysteresis-band frames inside the silence timer": (
         [0.9, 0.9, 0.1, 0.45, 0.1, 0.1, 0.1],
         {"threshold": 0.5, "prefix_padding_ms": 0, "silence_duration_ms": 96, "min_speech_duration_ms": 32},
         [("start", 0), ("stop", 160)],
+    ),
+    "clear speech inside the silence timer": (
+        [0.9, 0.9, 0.1, 0.9, 0.1, 0.1, 0.1, 0.1],
+        {"threshold": 0.5, "prefix_padding_ms": 0, "silence_duration_ms": 96, "min_speech_duration_ms": 32},
+        [("start", 0), ("stop", 224)],
     ),
     "min speech duration rejects a blip": (
         [0.9, 0.0, 0.9, 0.9, 0.9, 0.0, 0.0, 0.0, 0.0],
@@ -107,8 +116,8 @@ def test_endpoint_decisions_match_the_serving_side_policy(
 # --------------------------------------------------------------------------- #
 
 
-def test_a_loud_frame_does_not_restart_the_silence_timer() -> None:
-    """Silero v6.2 hysteresis: once silence is running, a loud frame only delays it.
+def test_a_hysteresis_band_frame_does_not_restart_the_silence_timer() -> None:
+    """Silero v6.2 hysteresis: once silence is running, an unclear frame only delays it.
 
     The frame at 0.45 sits above the negative threshold (0.35) but below the
     activation threshold. It must not cancel the pending endpoint, or a speaker
@@ -116,6 +125,61 @@ def test_a_loud_frame_does_not_restart_the_silence_timer() -> None:
     """
     config = SileroVADConfig(threshold=0.5, prefix_padding_ms=0, silence_duration_ms=96, min_speech_duration_ms=32)
     assert _drive(config, [0.9, 0.9, 0.1, 0.45, 0.1, 0.1]) == [("start", 0), ("stop", 160)]
+
+
+def test_clear_speech_cancels_a_pending_silence_candidate() -> None:
+    """A frame back at the activation threshold means the speaker paused, not stopped.
+
+    Silero's own ``VADIterator`` clears ``temp_end`` on such a frame, and so did
+    the serving-side policy. Without that, the candidate opened by a short pause
+    keeps accumulating across the speech that follows it, and the next quiet
+    frame commits the turn: below, a 32 ms pause 128 ms in, then 640 ms of clear
+    speech, and the turn would end 832 ms in with 32 ms of real silence behind
+    it -- mid-word, on a server-VAD session that auto-commits.
+    """
+    config = SileroVADConfig(threshold=0.5, prefix_padding_ms=300, silence_duration_ms=500, min_speech_duration_ms=96)
+    probabilities = [0.9] * 4 + [0.1] + [0.95] * 20 + [0.1] + [0.9] * 2 + [0.02] * 16
+
+    # 28 frames * 32 ms = 896 ms of speech, then the silence that really ends it.
+    assert _drive(config, probabilities) == [("start", 0), ("stop", 1408)]
+
+
+def test_the_reset_delays_an_endpoint_rather_than_removing_one() -> None:
+    """Trailing silence still commits the turn, measured from the last clear frame.
+
+    A pause at frame 2 that is cancelled at frame 3 endpoints in the same place
+    as a turn that never paused: both have their last clear frame at index 3.
+    """
+    config = SileroVADConfig(threshold=0.5, prefix_padding_ms=0, silence_duration_ms=96, min_speech_duration_ms=32)
+
+    paused = _drive(config, [0.9, 0.9, 0.1, 0.9, 0.1, 0.1, 0.1, 0.1])
+    uninterrupted = _drive(config, [0.9, 0.9, 0.9, 0.9, 0.1, 0.1, 0.1, 0.1])
+
+    assert paused == uninterrupted == [("start", 0), ("stop", 224)]
+
+
+def test_a_reset_clears_a_candidate_that_clear_speech_had_already_cancelled() -> None:
+    """Barge-in mid-turn: the silence clock goes with the rest of the stream state.
+
+    ``reset()`` keeps the session clock, so the next turn's ``speech_start_ms``
+    still refers to the session timeline, but it must not inherit a silence
+    candidate from the turn it replaced.
+    """
+    config = SileroVADConfig(threshold=0.5, prefix_padding_ms=0, silence_duration_ms=96, min_speech_duration_ms=32)
+    scores = iter([0.9, 0.1, 0.9, 0.9, 0.1, 0.1, 0.1])
+    vad = SileroStreamingVAD(config, frame_scorer=lambda _frame: next(scores))
+
+    for _ in range(4):  # speech, a pause, then clear speech cancelling it
+        vad.process(np.zeros(FRAME, dtype=np.float32))
+    assert vad.speech_active
+    vad.reset()
+    assert not vad.speech_active
+
+    events = [vad.process(np.zeros(FRAME, dtype=np.float32)) for _ in range(3)]
+
+    # Nothing survives the reset: three quiet frames cannot end a turn that is
+    # no longer running, and no stale candidate fires one.
+    assert not any(result.speech_stopped for result in events)
 
 
 def test_audio_end_ms_includes_the_trailing_silence() -> None:
