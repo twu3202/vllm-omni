@@ -10,7 +10,7 @@ its slots has its tail dropped with a warning rather than failing
 slots, so every uncertainty here has to resolve upwards.
 
 The camera side depends on HD slicing, which depends on the frame size
-*relative to the checkpoint's normalisation tile*. The tile is configuration,
+*relative to the checkpoint's normalization tile*. The tile is configuration,
 not a constant, so the cases below drive the arithmetic at more than one tile
 size and check it against ``MiniCPMVImageProcessor.get_sliced_grid`` -- the
 same grid search the checkpoint's own processor runs.
@@ -20,12 +20,18 @@ from __future__ import annotations
 
 import base64
 import io
+from dataclasses import dataclass
 
 import pytest
 from PIL import Image
 
+from vllm_omni.engine.duplex.config import DuplexSessionConfig
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.plugin import (
+    PRIVATE_RUNTIME_CONFIG_KEYS,
+    _apply_default_scheduler_policy,
+    _duplex_vision_tile_pixels,
     _duplex_vision_tokens,
+    _model_vision_tile_pixels,
     duplex_scheduler_token_budget,
 )
 from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_llm import MiniCPMVImageProcessor
@@ -162,3 +168,78 @@ def test_the_audio_budget_is_untouched_by_the_camera_track() -> None:
 
     assert duplex_scheduler_token_budget(audio_only, tile_pixels=TILE_448) == 12
     assert duplex_scheduler_token_budget(with_frames, tile_pixels=TILE_448) == 12 + 2 * TOKENS_PER_BLOCK
+
+
+# ---- where the tile comes from ----
+
+
+@dataclass(frozen=True)
+class _SliceConfig:
+    scale_resolution: int
+
+
+@dataclass(frozen=True)
+class _HFConfig:
+    slice_config: object = None
+    image_size: object = None
+
+
+@dataclass(frozen=True)
+class _ModelConfig:
+    hf_config: object = None
+
+
+@pytest.mark.parametrize(
+    ("hf_config", "expected"),
+    [
+        (_HFConfig(slice_config={"max_slice_nums": 1, "scale_resolution": 448}, image_size=448), TILE_448),
+        (_HFConfig(slice_config=_SliceConfig(scale_resolution=336), image_size=448), 336 * 336),
+        (_HFConfig(image_size=560), 560 * 560),
+        (_HFConfig(), None),
+        (_HFConfig(slice_config={"scale_resolution": 0}, image_size=0), None),
+    ],
+    ids=["released-checkpoint", "attribute", "image-size-fallback", "nothing-to-read", "nonsense"],
+)
+def test_the_tile_is_read_from_the_checkpoint(hf_config: object, expected: int | None) -> None:
+    """First row is the released MiniCPM-o 4.5 ``config.json``, where ``slice_config`` is a dict."""
+    assert _model_vision_tile_pixels(_ModelConfig(hf_config=hf_config)) == expected
+
+
+def test_no_model_config_means_no_tile() -> None:
+    assert _model_vision_tile_pixels(None) is None
+    assert _model_vision_tile_pixels(_ModelConfig()) is None
+
+
+def test_the_tile_reaches_the_budget_through_the_runtime_config() -> None:
+    """``_apply_default_scheduler_policy`` writes it; ``build_duplex_data_plane_prompt`` reads it back."""
+    runtime_config: dict[str, object] = {}
+
+    _apply_default_scheduler_policy(
+        runtime_config,
+        config=DuplexSessionConfig(),
+        tokenizer=None,
+        model_config=_ModelConfig(hf_config=_HFConfig(slice_config={"scale_resolution": 448})),
+    )
+
+    assert runtime_config["duplex_vision_tile_pixels"] == TILE_448
+    assert _duplex_vision_tile_pixels(runtime_config) == TILE_448
+
+
+def test_a_checkpoint_that_cannot_be_read_leaves_the_key_out() -> None:
+    """No key, no tile, and no tile is the sliced reservation."""
+    runtime_config: dict[str, object] = {}
+
+    _apply_default_scheduler_policy(runtime_config, config=DuplexSessionConfig(), tokenizer=None)
+
+    assert "duplex_vision_tile_pixels" not in runtime_config
+    assert _duplex_vision_tile_pixels(runtime_config) is None
+
+
+def test_a_junk_tile_in_the_runtime_config_is_ignored() -> None:
+    for value in (0, -1, "448", 448.0, None):
+        assert _duplex_vision_tile_pixels({"duplex_vision_tile_pixels": value}) is None
+
+
+def test_the_tile_is_server_owned() -> None:
+    """A client that could set the tile could shrink the reservation under the worker."""
+    assert "duplex_vision_tile_pixels" in PRIVATE_RUNTIME_CONFIG_KEYS

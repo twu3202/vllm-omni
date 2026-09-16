@@ -68,7 +68,7 @@ _DUPLEX_HD_SLICES_PER_BASE_FRAME = 3
 # ``MiniCPMVImageProcessor.get_sliced_grid`` takes
 # ``multiple = min(ceil(w * h / scale_resolution**2), max_slice_nums)`` and
 # returns no grid at all for ``multiple <= 1``; at 2 the only candidate split
-# is 2, so a frame is either unsliced or a 2-cell grid. One normalisation tile
+# is 2, so a frame is either unsliced or a 2-cell grid. One normalization tile
 # is therefore the whole decision -- but ``scale_resolution`` is the
 # checkpoint's, not a constant, so it is read from the model rather than
 # assumed.
@@ -136,7 +136,7 @@ def _duplex_base_frame_blocks(frame: str, tile_pixels: int | None) -> int:
 
 
 def _duplex_vision_tile_pixels(runtime_config: object) -> int | None:
-    """Area of the tile this model normalises a frame to, or ``None`` if unknown."""
+    """Area of the tile this model normalizes a frame to, or ``None`` if unknown."""
     if not isinstance(runtime_config, dict):
         return None
     value = runtime_config.get("duplex_vision_tile_pixels")
@@ -235,13 +235,13 @@ def build_duplex_data_plane_prompt(
     final: bool,
 ) -> dict[str, object]:
     tile_pixels = _duplex_vision_tile_pixels(runtime_config)
-    vision_tokens = _duplex_vision_tokens(payload, tile_pixels=tile_pixels)
     token_budget = duplex_scheduler_token_budget(payload, tile_pixels=tile_pixels)
     if seq <= 1:
         context_reserve = duplex_first_append_context_reserve(runtime_config)
         token_budget += context_reserve
         first_units = duplex_first_append_unit_count(payload)
         if first_units is not None:
+            vision_tokens = _duplex_vision_tokens(payload, tile_pixels=tile_pixels)
             token_budget = context_reserve + first_units * 12 - 1 + vision_tokens
     if seq > 1 and duplex_payload_is_exact_chunks(payload):
         token_budget += 1
@@ -518,7 +518,7 @@ def _apply_first_append_context_tokens(
 
 
 def _model_vision_tile_pixels(model_config: ModelConfig | None) -> int | None:
-    """Area of one normalisation tile, from the checkpoint that will do the slicing.
+    """Area of one normalization tile, from the checkpoint that will do the slicing.
 
     ``MiniCPMVImageProcessor`` is built with ``scale_resolution=config.image_size``
     and Stage0 loads the checkpoint's own processor, so this is per-checkpoint
