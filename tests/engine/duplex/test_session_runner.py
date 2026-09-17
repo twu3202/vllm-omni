@@ -48,6 +48,7 @@ from vllm_omni.engine.duplex.messages import (
 )
 from vllm_omni.engine.duplex.session.manager import DuplexSessionManager
 from vllm_omni.engine.duplex.session.runner import DuplexSessionRunner
+from vllm_omni.engine.duplex.vad import SileroVADBackendProvider, SpeechDetectorBackend
 from vllm_omni.metrics.stats import StageRequestStats, StageStats
 from vllm_omni.model_executor.models.minicpmo_4_5.duplex.plugin import MiniCPMO45DuplexPlugin
 
@@ -199,6 +200,7 @@ async def open_harness(
     runtime_config: DuplexSessionRuntimeConfig | None = None,
     stage_count: int = 2,
     clock: Any = None,
+    vad_backend_provider: SileroVADBackendProvider | None = None,
 ) -> Harness:
     plugin = MiniCPMO45DuplexPlugin(_fake_encode_audio)
     port = RecordingStagePort(stage_count=stage_count)
@@ -213,6 +215,8 @@ async def open_harness(
         model_config=None,
         clock=clock,
     )
+    if vad_backend_provider is not None:
+        manager.vad_backend_provider = vad_backend_provider
     body: dict[str, object] = {"auto_response": auto_response, **(extra_body or {})}
     config = DuplexSessionConfig(
         model="openbmb/MiniCPM-o-4_5",
@@ -1191,5 +1195,108 @@ async def test_server_vad_speech_stopped_still_commits_a_turn_mode_session() -> 
         assert "input_audio_buffer.speech_stopped" in types(events)
         assert "input_audio_buffer.committed" in types(events)
         assert len(_final_submissions(h)) == 1, "the detector's stop commits the turn and starts the response"
+    finally:
+        await close_harness(h)
+
+
+class _ScriptedSileroBackend:
+    """Scores each 512-sample frame from a script instead of running Silero."""
+
+    def __init__(self, probabilities: Sequence[float]) -> None:
+        self._probabilities = iter(probabilities)
+
+    def new_state(self) -> object:
+        return None
+
+    def infer(self, frame: np.ndarray, state: object) -> tuple[float, object]:
+        assert frame.size == 512
+        return next(self._probabilities, 0.0), state
+
+
+class _ScriptedSileroProvider(SileroVADBackendProvider):
+    def __init__(self, probabilities: Sequence[float]) -> None:
+        super().__init__()
+        self._scripted = _ScriptedSileroBackend(probabilities)
+
+    def get(self) -> SpeechDetectorBackend:
+        return self._scripted
+
+
+_SERVER_VAD = {
+    "type": "server_vad",
+    "threshold": 0.5,
+    "prefix_padding_ms": 300,
+    "silence_duration_ms": 500,
+    "min_speech_duration_ms": 96,
+}
+
+
+def _utterance_with_pause(pause_frames: int) -> list[float]:
+    """Speech, a 32 ms dip, 640 ms of speech, a pause, 800 ms of speech, then 800 ms of silence.
+
+    The dip matters: it opens the silence candidate that the speech after it has
+    to cancel. If it is not cancelled, the pause that follows fires it at once.
+    """
+    return [0.9] * 12 + [0.1] + [0.9] * 20 + [0.1] * pause_frames + [0.9] * 25 + [0.02] * 25
+
+
+async def _append_as_200ms_chunks(h: Harness, frames: int) -> list[DuplexEvent]:
+    events: list[DuplexEvent] = []
+    remaining = frames * 512
+    while remaining:
+        size = min(3200, remaining)
+        remaining -= size
+        events += await h.run(append_audio(size, is_speech=None))
+    return events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pause_frames", [6, 11], ids=["192ms-pause", "352ms-pause"])
+async def test_a_pause_shorter_than_the_silence_duration_does_not_commit_a_turn_mode_session(
+    pause_frames: int,
+) -> None:
+    """The real endpoint rules through the runner, not a scripted result.
+
+    With ``auto_response`` off the detector's stop is the commit, so an endpoint
+    fired inside the pause starts a response on the first half of the utterance.
+    """
+    probabilities = _utterance_with_pause(pause_frames)
+    h = await open_harness(
+        auto_response=False,
+        extra_body={"realtime_turn_detection": dict(_SERVER_VAD)},
+        vad_backend_provider=_ScriptedSileroProvider(probabilities),
+    )
+    try:
+        events = await _append_as_200ms_chunks(h, len(probabilities))
+
+        speech_frames = len(probabilities) - 25
+        stops = [event for event in events if event.type == "input_audio_buffer.speech_stopped"]
+        assert types(events).count("input_audio_buffer.speech_started") == 1
+        # The end of the audio sent, 500 ms of trailing silence included.
+        assert [stop.audio_end_ms for stop in stops] == [(speech_frames + 16) * 32]
+        assert types(events).count("input_audio_buffer.committed") == 1
+        assert len(_final_submissions(h)) == 1
+    finally:
+        await close_harness(h)
+
+
+@pytest.mark.asyncio
+async def test_a_pause_shorter_than_the_silence_duration_keeps_an_auto_response_utterance_whole() -> None:
+    """Nothing is committed either way here; an early endpoint splits the utterance in two instead.
+
+    The second segment opens with its own ``speech_started``, and that edge is
+    what ``barge_in_on_speech`` cancels a response on.
+    """
+    probabilities = _utterance_with_pause(11)
+    h = await open_harness(
+        extra_body={"realtime_turn_detection": dict(_SERVER_VAD)},
+        vad_backend_provider=_ScriptedSileroProvider(probabilities),
+    )
+    try:
+        events = await _append_as_200ms_chunks(h, len(probabilities))
+
+        assert types(events).count("input_audio_buffer.speech_started") == 1
+        assert types(events).count("input_audio_buffer.speech_stopped") == 1
+        assert "input_audio_buffer.committed" not in types(events)
     finally:
         await close_harness(h)

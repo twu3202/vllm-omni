@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import itertools
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -270,6 +271,91 @@ def test_resampling_keeps_the_frame_grid_from_drifting() -> None:
     whole = frames_for([source.size])
     split = frames_for([7, 13, 511, 512, 513, source.size - 1_556])
     assert whole == split == 16_000 // FRAME
+
+
+def _drive_in_chunks(
+    config: SileroVADConfig,
+    probabilities: list[float],
+    chunk_sizes: list[int],
+    *,
+    reset_at: int | None = None,
+    sample_rate_hz: int = SAMPLE_RATE_HZ,
+) -> list[tuple[str, int | None]]:
+    """``_drive``, but with the audio cut into ``chunk_sizes`` (cycled) the way appends arrive.
+
+    ``reset_at`` is an input sample offset; the chunk spanning it is split there so
+    every cutting resets at the same point. Edges reported by one call are listed
+    in the order ``realtime_events`` emits them.
+    """
+    scores = iter(probabilities)
+    vad = SileroStreamingVAD(config, frame_scorer=lambda _frame: next(scores, 0.0))
+    total = len(probabilities) * FRAME * sample_rate_hz // SAMPLE_RATE_HZ
+    events: list[tuple[str, int | None]] = []
+
+    def feed(size: int) -> None:
+        if size == 0:
+            return
+        silence = np.zeros(size, dtype=np.float32)
+        if sample_rate_hz == SAMPLE_RATE_HZ:
+            result = vad.process(silence)
+        else:
+            result = vad.process_base64(_pcm16_b64(silence), fmt="pcm16", sample_rate_hz=sample_rate_hz)
+        if result.speech_stopped and result.speech_active:
+            events.append(("stop", result.speech_end_ms))
+        if result.speech_started:
+            events.append(("start", result.speech_start_ms))
+        if result.speech_stopped and not result.speech_active:
+            events.append(("stop", result.speech_end_ms))
+
+    fed = 0
+    for size in itertools.cycle(chunk_sizes):
+        if fed == total:
+            return events
+        size = min(size, total - fed)
+        if reset_at is not None and fed < reset_at <= fed + size:
+            feed(reset_at - fed)
+            vad.reset()
+            feed(fed + size - reset_at)
+            reset_at = None
+        else:
+            feed(size)
+        fed += size
+    raise AssertionError("unreachable")
+
+
+#: Speech, a 32 ms dip, 640 ms of speech, another dip, 800 ms of speech, then
+#: 800 ms of silence. One segment, and only because clear speech cancels both dips.
+_TWO_DIPS = [0.9] * 12 + [0.1] + [0.9] * 20 + [0.1] + [0.9] * 25 + [0.02] * 25
+
+
+@pytest.mark.parametrize("prefix_padding_ms", [0, 300])
+@pytest.mark.parametrize("reset", [False, True], ids=["no-reset", "mid-frame-reset"])
+def test_endpoints_do_not_depend_on_where_the_audio_is_cut(prefix_padding_ms: int, reset: bool) -> None:
+    """The engine scores whole appends; the endpoints must not move with the append size.
+
+    This is what ``tests/entrypoints/openai_api/test_server_vad.py`` checked for the
+    serving-side pipeline before #7413 removed it. One call reports at most one
+    start and one stop, so no cutting here is longer than a 200 ms append.
+    """
+    config = SileroVADConfig(
+        threshold=0.5, prefix_padding_ms=prefix_padding_ms, silence_duration_ms=500, min_speech_duration_ms=96
+    )
+    reset_at = 20 * FRAME + 100 if reset else None
+    frame_by_frame = _drive_in_chunks(config, _TWO_DIPS, [FRAME], reset_at=reset_at)
+
+    for chunk_sizes in ([3_200], [73, 358, 1_023, 511, 513, 2_047], [7, 5, 11]):
+        assert _drive_in_chunks(config, _TWO_DIPS, chunk_sizes, reset_at=reset_at) == frame_by_frame, chunk_sizes
+    reset_at_24k = None if reset_at is None else reset_at * 3 // 2
+    at_24k = _drive_in_chunks(config, _TWO_DIPS, [110, 1_535, 4_799], reset_at=reset_at_24k, sample_rate_hz=24_000)
+    assert at_24k == frame_by_frame
+
+
+def test_the_cut_up_utterance_ends_once_after_the_real_silence() -> None:
+    """The case above does exercise the reset: without it the second dip ends the turn at 1088 ms."""
+    config = SileroVADConfig(threshold=0.5, prefix_padding_ms=300, silence_duration_ms=500, min_speech_duration_ms=96)
+
+    # 59 frames of speech, then 16 of silence to reach 500 ms: 75 * 32 ms = 2400 ms.
+    assert _drive_in_chunks(config, _TWO_DIPS, [3_200]) == [("start", 0), ("stop", 2_400)]
 
 
 def test_a_sample_rate_change_mid_stream_is_rejected() -> None:
