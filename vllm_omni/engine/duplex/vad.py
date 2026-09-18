@@ -18,10 +18,8 @@ session.
 
 Endpointing follows Silero v6.2's streaming hysteresis: activation uses the
 configured threshold, while a turn can only *end* on frames below
-``max(threshold - 0.15, 0.01)``. Frames between the two thresholds are neither:
-once a silence candidate exists they keep its clock running but cannot
-themselves close the turn, and a frame back at or above the activation
-threshold cancels the candidate outright.
+``max(threshold - 0.15, 0.01)``. Once a silence candidate exists, louder frames
+keep the elapsed-silence clock running but cannot themselves close the turn.
 """
 
 from __future__ import annotations
@@ -431,18 +429,16 @@ class SileroStreamingVAD:
             if self._speech_active:
                 contained_speech = True
                 if probability >= self.config.threshold:
-                    # Clear speech cancels a pending endpoint: the speaker did
-                    # not stop, they paused. Silero's own VADIterator clears
-                    # ``temp_end`` on a frame at or above the activation
-                    # threshold, and so did the serving-side
-                    # ``ThresholdEndpointPolicy`` this detector replaced.
+                    # Confirmed speech cancels a pending endpoint. Otherwise a
+                    # brief pause can age through resumed speech and split the
+                    # utterance at the next low-probability frame.
                     self._silence_samples = 0
                     continue
                 below_negative_threshold = probability < negative_threshold
                 if not below_negative_threshold and self._silence_samples == 0:
                     continue
-                # A silence candidate is running: a frame in the hysteresis band
-                # keeps its clock moving but cannot itself close the turn.
+                # Scores inside the hysteresis band keep the pending timer,
+                # but cannot themselves close the turn.
                 self._silence_samples += self._WINDOW_SAMPLES
                 if not below_negative_threshold or self._silence_samples < min_silence_samples:
                     continue
