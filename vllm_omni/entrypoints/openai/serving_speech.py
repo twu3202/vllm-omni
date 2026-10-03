@@ -578,7 +578,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
         The fallback load is attempted once: a failure is cached too, because
         this runs on the request path and a failing `from_pretrained` can take
-        seconds of hub lookups. It follows the server's `trust_remote_code`.
+        seconds of hub lookups. It follows the server's `trust_remote_code`,
+        and is skipped when the engine runs with `skip_tokenizer_init`.
         """
         if self._tts_tokenizer is not None:
             return self._tts_tokenizer
@@ -588,10 +589,15 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 from transformers import AutoTokenizer
 
                 model_config = self.engine_client.model_config
-                tokenizer = AutoTokenizer.from_pretrained(
-                    model_config.model,
-                    trust_remote_code=bool(getattr(model_config, "trust_remote_code", False)),
-                )
+                if getattr(model_config, "skip_tokenizer_init", False):
+                    # The engine loads no tokenizer either; the speech models
+                    # that set this (YuE2, IndexTTS-2) ship none to load.
+                    tokenizer = _USAGE_TOKENIZER_UNAVAILABLE
+                else:
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        model_config.model,
+                        trust_remote_code=bool(getattr(model_config, "trust_remote_code", False)),
+                    )
             except Exception as e:
                 logger.warning("Usage: could not load a text tokenizer (%s); text_tokens will be 0", e)
                 tokenizer = _USAGE_TOKENIZER_UNAVAILABLE
