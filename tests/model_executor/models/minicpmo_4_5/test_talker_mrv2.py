@@ -29,6 +29,8 @@ def _talker(max_reqs: int = 8, max_position_embeddings: int = 4096):
     talker._codec_eos_id = _EOS
     talker._tts_config = SimpleNamespace(max_position_embeddings=max_position_embeddings)
     talker._mrv2_empty_speech = torch.zeros(max_reqs, dtype=torch.bool)
+    talker._mrv2_code_runs = torch.zeros((max_reqs, 2), dtype=torch.long)
+    talker._codec_classes("cpu")
     talker._mrv2_forced_eos = None
     talker._mrv2_decode_rows_logged = False
     return talker
@@ -232,6 +234,96 @@ def test_mrv2_turn_end_drain_masks_cadence_eos(mocker, step, turn_start, turn_en
     assert (output.sampled_token_ids.item() != _EOS) is masked
 
 
+def _mrv2_turn_end_samples_eos(mocker, talker, *, step: int, code: int, wants_eos: bool = True) -> bool:
+    """One decode step of a turn-end condition whose turn ended a sentence; True if EOS is sampled."""
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput
+
+    from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_tts import MiniCPMO45TalkerSampler
+
+    batch, _ = _batch([dict(slot=2, prompt_len=4, computed=3 + step, span=[code], prefill=False)])
+    states = _req_states({2: 4})
+    talker.make_omni_output_mrv2(
+        torch.zeros((1, 4)),
+        input_batch=batch,
+        req_states=states,
+        model_intermediate_buffer=[
+            {
+                "native_duplex": True,
+                "duplex": {"epoch": 3, "turn_id": 7},
+                "meta": {"turn_end": True, "turn_text_ends_sentence": True},
+            }
+        ],
+    )
+    base = mocker.Mock(
+        side_effect=lambda logits, _: SamplerOutput(
+            sampled_token_ids=logits.argmax(-1)[:, None],
+            logprobs_tensors=None,
+            num_nans=None,
+            num_sampled=torch.ones(1, dtype=torch.int32),
+            num_rejected=torch.zeros(1, dtype=torch.int32),
+        )
+    )
+    base.req_states = states
+    logits = torch.zeros(1, _EOS + 1)
+    logits[0, _EOS if wants_eos else 0] = 10
+    return MiniCPMO45TalkerSampler(base, talker)(logits, batch).sampled_token_ids.item() == _EOS
+
+
+def test_mrv2_turn_end_drain_waits_for_silence(mocker):
+    from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_tts import _SILENT_CODEC_IDS
+
+    talker, silent = _talker(), _SILENT_CODEC_IDS[0]
+    # While the Talker is speaking, its cadence EOS is masked at and between boundaries.
+    assert not _mrv2_turn_end_samples_eos(mocker, talker, step=24, code=17)
+    assert not _mrv2_turn_end_samples_eos(mocker, talker, step=25, code=17)
+    # One silent code is not enough; after two in a row the model may stop.
+    assert not _mrv2_turn_end_samples_eos(mocker, talker, step=26, code=silent)
+    assert _mrv2_turn_end_samples_eos(mocker, talker, step=27, code=silent)
+    # Speech resets the run.
+    assert not _mrv2_turn_end_samples_eos(mocker, talker, step=28, code=17)
+
+
+def test_mrv2_turn_end_drain_resets_runs_on_prefill(mocker):
+    """A request resumed after preemption re-prefills with step > 0; its slot's runs start over."""
+    from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_tts import _SILENT_CODEC_IDS
+
+    talker, silent = _talker(), _SILENT_CODEC_IDS[0]
+    assert not _mrv2_turn_end_samples_eos(mocker, talker, step=26, code=silent)
+    assert _mrv2_turn_end_samples_eos(mocker, talker, step=27, code=silent)
+    # The prefill's last input is a silent code: without the prefill reset it would extend the run.
+    batch, _ = _batch([dict(slot=2, prompt_len=4, computed=0, span=[0] * 30 + [silent], prefill=True)])
+    talker.make_omni_output_mrv2(
+        torch.zeros((31, 4)),
+        input_batch=batch,
+        req_states=_req_states({2: 4}),
+        model_intermediate_buffer=[
+            {
+                "native_duplex": True,
+                "duplex": {"epoch": 3, "turn_id": 7},
+                "meta": {"turn_end": True, "turn_text_ends_sentence": True},
+            }
+        ],
+    )
+    assert talker._mrv2_code_runs[2].tolist() == [0, 0]
+    assert not _mrv2_turn_end_samples_eos(mocker, talker, step=28, code=silent)
+
+
+def test_mrv2_turn_end_drain_forces_eos_after_a_quiet_run(mocker):
+    from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_tts import (
+        _QUIET_CODEC_IDS,
+        _SILENT_CODEC_IDS,
+        _TURN_END_QUIET_STOP_FRAMES,
+    )
+
+    talker = _talker()
+    quiet = next(code for code in _QUIET_CODEC_IDS if code not in _SILENT_CODEC_IDS)
+    for step in range(10, 10 + _TURN_END_QUIET_STOP_FRAMES - 1):
+        assert not _mrv2_turn_end_samples_eos(mocker, talker, step=step, code=quiet, wants_eos=False)
+    assert _mrv2_turn_end_samples_eos(
+        mocker, talker, step=10 + _TURN_END_QUIET_STOP_FRAMES - 1, code=quiet, wants_eos=False
+    )
+
+
 @hardware_test(res={"cuda": "L4"}, num_cards=1)
 def test_mrv2_sampler_applies_codec_window_penalty_instead_of_stock_penalty():
     """The real MRv2 sampler pipeline scores the V1 16-frame codec penalty.
@@ -349,8 +441,8 @@ def test_turn_decode_does_not_build_duplex_limit_tensors(monkeypatch):
     def reject_copy(*args, **kwargs):
         raise AssertionError("ordinary turn decode must not upload duplex limits")
 
-    monkeypatch.setattr(module, "index_to_device", reject_copy)
     talker = _talker()
+    monkeypatch.setattr(module, "index_to_device", reject_copy)
     batch, _ = _batch([dict(slot=0, prompt_len=4, computed=5, span=[1], prefill=False)])
     talker.make_omni_output_mrv2(
         torch.zeros(1, 4),
