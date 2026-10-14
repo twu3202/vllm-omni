@@ -30,6 +30,7 @@ def _talker(max_reqs: int = 8, max_position_embeddings: int = 4096):
     talker._tts_config = SimpleNamespace(max_position_embeddings=max_position_embeddings)
     talker._mrv2_empty_speech = torch.zeros(max_reqs, dtype=torch.bool)
     talker._mrv2_code_runs = torch.zeros((max_reqs, 2), dtype=torch.long)
+    talker._num_audio_tokens = _EOS + 1
     talker._codec_classes("cpu")
     talker._mrv2_forced_eos = None
     talker._mrv2_decode_rows_logged = False

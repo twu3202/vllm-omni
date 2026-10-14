@@ -1134,6 +1134,7 @@ def llm2tts(
             set_ref_audio(model_intermediate_buffer, _to_transport_list(ref_waveform), ref_sr)
         handoff_hidden = _to_transport_list(tts_hidden_slice) if tts_hidden_slice is not None else None
         native_turn_end_handoff = False
+        turn_text_ends_sentence = False
         if is_native_duplex_handoff:
             turn_eos_id = special_token_ids.get("turn_eos_token_id")
             native_turn_end_handoff = turn_eos_id is not None and handoff_ids is not None and turn_eos_id in handoff_ids

@@ -81,11 +81,11 @@ def _native_duplex_chunk_budget(meta: Mapping[str, Any] | None) -> tuple[int, in
 
 
 def _turn_end_boundary_eos_masked(step: int) -> bool:
-    """Whether a turn-end chunk masks codec EOS at ``step`` forwarded frames.
+    """Whether a ``_DRAIN_BOUNDARY_MASK`` turn-end chunk masks codec EOS at ``step`` forwarded frames.
 
     The Talker emits a cadence EOS after every 25 frames regardless of the text
-    left, so a turn-end chunk ignores EOS in a short window after each boundary
-    and lets the model continue; EOS elsewhere ends the chunk as usual.
+    left, so such a chunk ignores EOS in a short window after each boundary and
+    lets the model continue; EOS elsewhere ends the chunk as usual.
     """
     if step < _DUPLEX_CODEC_FRAMES_PER_CHUNK:
         return False

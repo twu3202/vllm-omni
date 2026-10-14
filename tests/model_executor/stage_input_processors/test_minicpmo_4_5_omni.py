@@ -667,9 +667,10 @@ def test_native_duplex_turn_end_uses_the_last_text_of_the_turn() -> None:
     assert second["meta"]["turn_end"] is True
     assert second["meta"]["turn_text_ends_sentence"] is True
 
-    # The next turn starts over: its first unit has no sentence end.
+    # The next turn starts over: a turn-end unit without text of its own does not
+    # inherit the previous turn's sentence end.
     context.bridge_states["duplex"]["model_turn_id"] = 8
-    third_ids = [9304, 22, 9310, 9308]
+    third_ids = [9304, 9310, 9308]
     third = llm2tts([output(third_ids)], prompt=[{}], _streaming_context=context)[0]["model_intermediate_buffer"]
     assert third["meta"]["turn_end"] is True
     assert third["meta"]["turn_text_ends_sentence"] is False

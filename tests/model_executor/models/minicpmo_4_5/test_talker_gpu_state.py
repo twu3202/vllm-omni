@@ -12,7 +12,10 @@ from tests.model_executor.models.minicpmo_4_5.test_talker_batching import (
     _make_talker,
     _reference_repetition_penalty,
 )
-from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_tts import _DRAIN_BOUNDARY_MASK
+from vllm_omni.model_executor.models.minicpmo_4_5.minicpmo_4_5_omni_tts import (
+    _DRAIN_BOUNDARY_MASK,
+    _DRAIN_UNTIL_SILENT,
+)
 from vllm_omni.model_executor.stage_input_processors.minicpmo_4_5_omni import _extract_codec_delta
 from vllm_omni.utils.mm_outputs import build_mm_cpu, to_payload_element
 
@@ -141,13 +144,13 @@ def test_v1_gpu_turn_end_drain_until_silent_matches_cpu(device):
         talker.silent_codec_ids, talker.quiet_codec_ids = (2,), (2, 3)
     gpu.emb_code = torch.nn.ModuleList([torch.nn.Embedding(8, 2, device=device)])
     cpu.emb_code = torch.nn.ModuleList([torch.nn.Embedding(8, 2)])
-    drain = {"finished": False, "step": 0, "max_tokens": 104, "min_tokens": 0, "turn_end_drain": 2}
+    drain = {"finished": False, "step": 0, "max_tokens": 104, "min_tokens": 0, "turn_end_drain": _DRAIN_UNTIL_SILENT}
     gpu._request_audio_states = {
         # Silent codes retained from the previous condition do not count.
         "a": dict(drain, recent_codes=[2, 2]),
         "b": dict(drain),
         # The boundary mask (kind 1) is unchanged.
-        "c": dict(drain, step=20, turn_end_drain=1),
+        "c": dict(drain, step=20, turn_end_drain=_DRAIN_BOUNDARY_MASK),
     }
     cpu._request_audio_states = copy.deepcopy(gpu._request_audio_states)
     codes = {"a": [2, 2, 1, 2, 2, 1, 1, 1, 1, 1], "b": [3] * 9 + [1], "c": [1] * 10}
