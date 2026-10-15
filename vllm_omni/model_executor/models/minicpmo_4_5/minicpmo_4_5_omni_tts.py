@@ -1123,7 +1123,15 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
                     if input_batch.has_prefill
                     else None
                 )
-                silent_run, quiet_run = self._mrv2_trailing_code_runs(slot_ids, last_ids, valid, prefilling)
+                silent_run, quiet_run = self._mrv2_trailing_code_runs(
+                    slot_ids,
+                    last_ids,
+                    valid,
+                    prefilling,
+                    token_ids=req_states.all_token_ids.gpu,
+                    seq_lens=input_batch.seq_lens[:num_reqs].long(),
+                    prompt_len=prompt_len,
+                )
                 until_silent = drain == _DRAIN_UNTIL_SILENT
                 forced = forced | (until_silent & (quiet_run >= _TURN_END_QUIET_STOP_FRAMES))
                 masked = masked | (until_silent & (silent_run < _TURN_END_SILENT_FRAMES))
@@ -1196,26 +1204,42 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
         last_ids: torch.Tensor,
         valid: torch.Tensor,
         prefilling: torch.Tensor | None,
+        *,
+        token_ids: torch.Tensor | None = None,
+        seq_lens: torch.Tensor | None = None,
+        prompt_len: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Silent and quiet codes in a row, per row, ending with this step's input code.
 
-        A row without a forwarded code this step (EOS, empty condition) or with a
-        prefill (a new condition, or a request resumed after preemption) resets
-        both runs, so they only count codes of the current condition.
+        A decode row extends its slot's runs with its input code; a row without a
+        forwarded code this step (EOS, empty condition) resets them. A prefill row
+        either starts a condition (no codes yet) or recomputes one after
+        preemption, so its runs are rebuilt from the request's token history
+        (``token_ids``: ``req_states.all_token_ids``): the condition's codes before
+        position ``seq_lens``. Runs are rebuilt up to the quiet-stop length, which
+        is all the stop rule reads.
         """
         assert self._mrv2_code_runs is not None
         table = self._codec_classes(last_ids.device)
-        classes = table.index_select(0, last_ids.long().clamp(0, table.shape[0] - 1)).long()
-        hits = (
-            torch.stack([(classes & _CODEC_CLASS_SILENT) != 0, (classes & _CODEC_CLASS_QUIET) != 0], dim=1)
-            & valid[:, None]
-        )
-        if prefilling is not None:
-            hits &= ~prefilling[:, None]
+        hits = self._codec_class_hits(table, last_ids) & valid[:, None]
         runs = self._mrv2_code_runs.index_select(0, slot_ids)
         runs = torch.where(hits, runs + 1, torch.zeros_like(runs))
+        if prefilling is not None:
+            assert token_ids is not None and seq_lens is not None and prompt_len is not None
+            span = _TURN_END_QUIET_STOP_FRAMES
+            positions = seq_lens[:, None] - span + torch.arange(span, device=slot_ids.device)
+            history = token_ids[slot_ids[:, None], positions.clamp(min=0)]
+            history_hits = self._codec_class_hits(table, history) & (positions >= prompt_len[:, None])[..., None]
+            rebuilt = history_hits.flip(1).long().cumprod(1).sum(1)
+            runs = torch.where(prefilling[:, None], rebuilt, runs)
         self._mrv2_code_runs.index_copy_(0, slot_ids, runs)
         return runs[:, 0], runs[:, 1]
+
+    @staticmethod
+    def _codec_class_hits(table: torch.Tensor, ids: torch.Tensor) -> torch.Tensor:
+        """``[..., 2]`` flags (silent, quiet) per codec id; out-of-table ids map to the last entry."""
+        classes = table.index_select(0, ids.long().clamp(0, table.shape[0] - 1).flatten()).view(ids.shape).long()
+        return torch.stack([(classes & _CODEC_CLASS_SILENT) != 0, (classes & _CODEC_CLASS_QUIET) != 0], dim=-1)
 
     def take_mrv2_forced_eos(self, input_batch: Any, req_states: Any, num_rows: int) -> torch.Tensor | None:
         """This step's forced-EOS rows, once; ``None`` outside a model step (warmup)."""
