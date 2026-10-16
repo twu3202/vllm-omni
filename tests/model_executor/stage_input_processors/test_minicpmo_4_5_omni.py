@@ -641,6 +641,35 @@ def test_native_duplex_turn_end_closes_text_only_after_a_sentence_end(text, comp
     assert info["meta"]["next_stage_prompt_len"] == len(info["ids"]["tts"]) + (2 if complete else 1)
 
 
+@pytest.mark.parametrize(
+    "unit_text,after_turn_eos,complete",
+    [
+        # The period sampled after <|turn_eos|> never reaches the Talker: the turn stops mid-sentence.
+        ("So the", ".", False),
+        # The word sampled after <|turn_eos|> is dropped from the handoff: the turn ends a sentence.
+        ("Sure, here it is.", "And", True),
+    ],
+)
+def test_native_duplex_turn_end_reads_only_the_text_handed_to_the_talker(unit_text, after_turn_eos, complete) -> None:
+    source, _ = _native_source(
+        prompt_ids=[101, 102],
+        output_ids=[9304, 21, 9310, 22, 9308],
+        row_ids=[101, 102, 9304, 21, 9310, 22],
+    )
+    token_text = {21: unit_text, 22: after_turn_eos}
+    context = StreamingInputState(
+        bridge_states={"duplex": {"epoch": 3, "model_turn_id": 7}},
+        source_token_decoder=lambda ids, **_: "".join(token_text.get(int(i), "") for i in ids),
+    )
+
+    info = llm2tts([source], prompt=[{}], _streaming_context=context)[0]["model_intermediate_buffer"]
+
+    assert info["ids"]["tts"] == [21, 9310]
+    assert info["meta"]["turn_end"] is True
+    assert info["meta"]["turn_text_ends_sentence"] is complete
+    assert info["meta"]["next_stage_prompt_len"] == len(info["ids"]["tts"]) + (2 if complete else 1)
+
+
 def test_native_duplex_turn_end_uses_the_last_text_of_the_turn() -> None:
     prompt_ids = [101, 102]
     token_text = {21: "Sure, here it is.", 22: "And", 23: "more."}

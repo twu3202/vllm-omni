@@ -760,14 +760,24 @@ def _native_duplex_segment_output_ids(
     state["sent_output_len"] = len(output_ids)
     state["sent_output_ids"] = list(output_ids)
     state["turn_id"] = turn_id
-    # The end of the turn's text so far (see _native_duplex_turn_text_ends_sentence).
-    tail = "" if turn_start else str(state.get("turn_text_tail") or "")
-    state["turn_text_tail"] = (tail + segment_text)[-_TURN_TEXT_TAIL_CHARS:]
+    if turn_start:
+        # The text handed to the Talker in this turn starts over (see
+        # _native_duplex_append_turn_text).
+        state["turn_text_tail"] = ""
     return segment_ids, segment_text, turn_start
 
 
+def _native_duplex_append_turn_text(streaming_context, *, request_id: str, text: str) -> None:
+    """Add text handed to the Talker to the end of the turn's text kept in the handoff state."""
+    bridge_states = getattr(streaming_context, "bridge_states", None)
+    state = bridge_states.get("minicpmo45_tts_handoff") if isinstance(bridge_states, dict) else None
+    if not text or not isinstance(state, dict) or state.get("request_id") != request_id:
+        return
+    state["turn_text_tail"] = (str(state.get("turn_text_tail") or "") + text)[-_TURN_TEXT_TAIL_CHARS:]
+
+
 def _native_duplex_turn_text_ends_sentence(streaming_context, *, request_id: str) -> bool:
-    """Whether the current turn's Thinker text so far ends a sentence."""
+    """Whether the text handed to the Talker so far in this turn ends a sentence."""
     bridge_states = getattr(streaming_context, "bridge_states", None)
     state = bridge_states.get("minicpmo45_tts_handoff") if isinstance(bridge_states, dict) else None
     if not isinstance(state, dict) or state.get("request_id") != request_id:
@@ -1094,6 +1104,11 @@ def llm2tts(
                 # text comes from total_ids_in_unit, the same slice that
                 # conditions the Talker.
                 thinker_text = handoff_text
+                # The sentence-end check reads the same slice, so text sampled
+                # after <|turn_eos|> (dropped above) does not decide it.
+                _native_duplex_append_turn_text(
+                    _streaming_context, request_id=str(llm_output.request_id), text=handoff_text
+                )
         model_intermediate_buffer = build_duplex_intermediate_buffer(
             request_id=str(llm_output.request_id),
             prompt_token_ids=prompt_token_ids,
