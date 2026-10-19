@@ -1739,18 +1739,40 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             else:
                 codes = codes.to(device=hidden.device, dtype=torch.long).reshape(-1)
             step = _codec_int_param(state, "step", 0)
-            # Note: main's turn-end semantics require masking codec EOS within 5
-            # steps after each 25-frame cadence boundary (see
-            # _turn_end_boundary_eos_masked and state["turn_end_drain"];
+            # Note: a turn-end chunk drains the way state["turn_end_drain"]
+            # says (see _DRAIN_*), with the same criteria the single-frame
+            # path's mask_eos_rows / force_eos_rows apply. _DRAIN_BOUNDARY_MASK
+            # masks codec EOS within 5 steps after each 25-frame cadence
+            # boundary (see _turn_end_boundary_eos_masked;
             # MINICPMO45_DUPLEX_TURN_END_CODEC_TOKENS is 4 chunks, so the window
-            # lands on steps 25-29 / 50-54 / 75-79 / 100-104). The EOS masking
-            # lives in the sampling core (talker_codec_sample.
-            # prepare_codec_logits / greedy_codec_sample), so the periodic
-            # window rides along as the eos_window_masked flag below -- the same
-            # criterion the single-frame path's mask_eos_rows applies.
+            # lands on steps 25-29 / 50-54 / 75-79 / 100-104). _DRAIN_UNTIL_SILENT
+            # masks it until this condition ends in two silent codes and stops
+            # the chunk after a run of quiet ones. The EOS masking lives in the
+            # sampling core (talker_codec_sample.prepare_codec_logits /
+            # greedy_codec_sample), so it rides along as the eos_window_masked
+            # flag below.
             min_tokens = _codec_int_param(state, "min_tokens", self._codec_min_tokens)
             max_tokens = _codec_int_param(state, "max_tokens", self._codec_max_tokens)
-            eos_window_masked = bool(state.get("turn_end_drain")) and _turn_end_boundary_eos_masked(step)
+            drain = int(state.get("turn_end_drain") or _DRAIN_NONE)
+            eos_window_masked = drain == _DRAIN_BOUNDARY_MASK and _turn_end_boundary_eos_masked(step)
+            if drain == _DRAIN_UNTIL_SILENT:
+                # The confirmed-frame record (below) is host-side and gains one
+                # code per confirmed frame, so its last ``step`` codes are this
+                # condition's without a device sync.
+                confirmed = getattr(self, "_request_codec_history", {}).get(request_id) or []
+                silent_run, quiet_run = _trailing_code_runs(
+                    step, confirmed[-step:] if step > 0 else [], self.silent_codec_ids, self.quiet_codec_ids
+                )
+                if quiet_run >= _TURN_END_QUIET_STOP_FRAMES:
+                    # The single-frame path forces this frame's sample to EOS;
+                    # finish the chunk here the same way, without sampling.
+                    state["finished"] = True
+                    info["audio_state"] = state
+                    stop_rows.append(row_stop)
+                    codec_deltas.append(empty_delta)
+                    terminal_flags.append(flag_true)
+                    continue
+                eos_window_masked = silent_run < _TURN_END_SILENT_FRAMES
             # A request pinning temperature to 0 (override or stage default)
             # takes the deterministic boundary sampler, same as single-frame.
             # Both boundary samplers return the full sample result; the device
@@ -1795,8 +1817,9 @@ class MiniCPMO45OmniTTSForConditionalGeneration(nn.Module, SupportsPP):
             state["step"] = _codec_int_param(state, "step", 0) + 1
             # Single-source stop routing: the device state owns the
             # eos/stop-id/limit transition (codec_sample_result), so the host
-            # only consumes its finished/emit decision. Repetition detection
-            # stays host-side -- the scheduler never sees codec ids, so the
+            # only consumes its finished/emit decision. The _DRAIN_UNTIL_SILENT
+            # quiet-run stop above finishes before sampling, and repetition
+            # detection stays host-side -- the scheduler never sees codec ids, so the
             # engine's check_stop cannot police the codec stream; this mirrors
             # it over codec_full_ids exactly as the engine does over its
             # tokens (v1/core/sched/utils.py:125-133).
