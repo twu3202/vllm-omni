@@ -389,8 +389,9 @@ vllm serve openbmb/MiniCPM-o-4_5 --omni \
 
 - **Talker sampling**: Stage 1's `default_sampling_params` in the deploy
   YAML set the Talker's codec sampling (temperature, top-p, top-k,
-  repetition penalty, `min_tokens`, seed). Leave stage 1 out of a request's
-  `sampling_params_list` to keep them.
+  repetition penalty, `min_tokens`, seed). A stage-1 entry in a request's
+  `sampling_params_list` overrides only the fields it names and keeps the
+  other deploy defaults.
 
 - **Output audio**: 24 kHz mono. On `/v1/chat/completions` it is base64 WAV
   inside the OpenAI-style `message.audio.data` (the Gradio demo's WAV player
