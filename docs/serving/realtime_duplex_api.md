@@ -344,11 +344,15 @@ and graph mode. The example inherits the duplex profile. For a turn-mode
 comparison, point `base_config` at `minicpmo_4_5_turn.yaml` in the same deploy
 directory instead; the overlay above does not change the turn-mode profile,
 while editing the shared `minicpmo_4_5.yaml` affects both serving modes.
+The turn profile also turns on stage-0 prefix caching on CUDA, which the duplex
+profile keeps off; keep that setting the same across the backends you compare.
 
 For a quality comparison, keep the source and model revisions, reference audio,
 input audio/video, frame rate, pacing, window settings, sampling parameters,
-stage-0 `max_num_batched_tokens`, concurrency, hardware and runtime versions the
-same. Sampling parameters alone do not decide the replies: changing only stage-0
+stage-0 `max_num_batched_tokens`, each stage's CUDA graph or eager mode, the
+load (`duplex_session.max_sessions` and how many sessions or requests the client
+runs at once), hardware and runtime versions the same. Sampling parameters
+alone do not decide the replies: changing only stage-0
 `max_num_batched_tokens` can change them as much as switching the backend does.
 Compare several matched seeds and repeat sessions after a fresh server
 start. Evaluate replies against the scene and question timestamps: a later
