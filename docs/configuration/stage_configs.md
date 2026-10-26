@@ -816,3 +816,13 @@ stereo; benchmark raw PCM with `VLLM_OMNI_BENCH_AUDIO_SAMPLE_RATE=48000` and
 `VLLM_OMNI_BENCH_AUDIO_CHANNELS=2`. See the
 [MOSS recipe](gh-file:recipes/OpenMOSS/MOSS-TTS.md#local-15-unified-deployment-and-slot-attention)
 for the execution path and configuration overrides.
+
+## MiniMax-Music3 with Model Runner V2
+
+`minimax_music3.yaml` and `minimax_music3_2gpu.yaml` run both stages on MRV2 on
+CUDA and on V1 on other platforms. To run V1 on CUDA, set `model_runner: v1`
+under `platforms.cuda` in a copy of either file. The talker keeps one
+implementation of its CFG pairing, frame feedback and seeded frame draw for
+both runners; on MRV2 a model state feeds it the batch's rows, counts and
+per-request extra args. Stage 0 keeps `async_scheduling: false` on both runners,
+because both members of a CFG pair must be sampled in the same engine step.

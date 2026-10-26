@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """Stage-input processors for MiniMax Music 3: AR talker -> acoustic decoder.
 
 Three entry points, all referenced from
@@ -94,7 +94,7 @@ from vllm_omni.model_executor.models.minimax_music3.constants import (
     AR_HIDDEN_SIZE,
     NUM_CODEBOOKS,
 )
-from vllm_omni.model_executor.models.minimax_music3.prompt import build_cfg_null_token_ids
+from vllm_omni.model_executor.models.minimax_music3.prompt import SPECIAL_TOKEN_IDS, build_cfg_null_token_ids
 from vllm_omni.model_executor.stage_input_processors.bagel import ExpandedPrompt
 
 __all__ = [
@@ -110,6 +110,8 @@ CFG_UNCOND_SUFFIX = "__cfg_uncond"
 
 _COND = "cond"
 _UNCOND = "uncond"
+
+_AUDIO_END_TOKEN_ID = SPECIAL_TOKEN_IDS["<|audio_end|>"]
 
 # Per-request forwarder state, parked on the transfer manager's request map.
 _STATE_KEY = "_minimax_music3_async_state"
@@ -316,6 +318,18 @@ def _request_audio_seed(request: Any, payload: Any) -> int | None:
     return int(seed) if isinstance(seed, int) else None
 
 
+def _stop_sampled(request: Any) -> bool:
+    """Whether the step being published sampled the request's ``<|audio_end|>``.
+
+    On the Model Runner V2 data plane a step's payload is published with the
+    tokens sampled in that step, before the scheduler acknowledges the finish.
+    The talker's terminal span rides on the step that samples the stop token,
+    so ``request.is_finished()`` is still False there; the sampled ids are what
+    say the engine is ending the request. V1 requests carry no such field.
+    """
+    return _AUDIO_END_TOKEN_ID in (getattr(request, "sampled_token_ids", None) or ())
+
+
 def _forwarder_state(transfer_manager: Any, request_id: str) -> dict[str, Any]:
     """Return (creating if needed) the per-request forwarder state."""
     request_state = transfer_manager.request_payload.get(request_id)
@@ -403,7 +417,7 @@ def ar2acoustic_async_chunk(
     # so. Only the engine's verdict closes the stream, so a talker that flags
     # a span last while generation continues is reported rather than obeyed.
     terminal = bool(finished or published_last)
-    if published_last and not finished:
+    if published_last and not finished and not _stop_sampled(request):
         logger.warning(
             "MiniMax Music 3 talker flagged a terminal span for request %s while the "
             "engine still has the request running",

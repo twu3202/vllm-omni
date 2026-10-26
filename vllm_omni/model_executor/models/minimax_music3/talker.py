@@ -274,6 +274,11 @@ class MiniMaxMusic3TalkerForConditionalGeneration(nn.Module):
         # The depth loop is recorded per pair count and replayed after that.
         self._depth_graphs = DepthGraphCache(self._depth_decode_eager)
 
+    def create_mrv2_model_state(self, vllm_config, encoder_cache, device):
+        from .model_state import create_minimax_music3_talker_model_state
+
+        return create_minimax_music3_talker_model_state(vllm_config, self, encoder_cache, device)
+
     # ---------------------------------------------------------------- forward
 
     def prepare_runner_inputs(

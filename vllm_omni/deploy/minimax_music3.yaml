@@ -9,7 +9,12 @@
 # extra_args block below is what turns on has_sampling_extra_args (so per-row
 # sampling extra args reach the model's forward) and is also how the CFG
 # scheduler patches learn this stage is paired.
+#
+# Runner selection: both stages run Model Runner V2 on CUDA (the
+# `platforms.cuda` entry below) and V1 everywhere else. Set
+# `model_runner: v1` under `platforms.cuda` in a copy of this file to opt out.
 pipeline: minimax_music3
+model_runner: v1
 async_chunk: true
 
 # The repo-root config.json reports model_type=minimax_music3, which upstream
@@ -129,6 +134,8 @@ stages:
       seed: 0
 
 platforms:
+  cuda:
+    model_runner: v2
   xpu:
     stages:
       - stage_id: 0
