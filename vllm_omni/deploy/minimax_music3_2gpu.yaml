@@ -85,10 +85,16 @@ stages:
     # input batch, which breaks when chunk arrival staggers requests.
     async_scheduling: false
     enable_prefix_caching: false
-    # One placeholder prompt token per arriving window, so a six-minute song
-    # (90 windows) needs a tiny context.
+    # V1: one placeholder prompt token per arriving window, so a six-minute
+    # song (90 windows) needs a tiny context. V2: each window's codes replace
+    # the prompt (200 frames x 8 codebooks = 1600 tokens), so the context only
+    # has to hold one window.
     max_model_len: 4096
-    max_num_batched_tokens: 4096
+    # On V2 one step should fit a window for every request (16 x 1600 =
+    # 25600; a song's last span can reach 300 frames, 2400 tokens). A window
+    # is never split, and the scheduler stops at the first window that does
+    # not fit, so a smaller budget lets the same few requests take every step.
+    max_num_batched_tokens: 32768
     devices: "1"
     input_connectors:
       from_stage_0: connector_of_shared_memory
