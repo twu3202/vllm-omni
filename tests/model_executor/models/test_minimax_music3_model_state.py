@@ -32,6 +32,8 @@ class _Drawn:
 
 
 class _Talker:
+    publishes_windows = True
+
     def __init__(self) -> None:
         self.bound: dict | None = None
         self.logits_input: torch.Tensor | None = None
@@ -172,8 +174,10 @@ def _sampler() -> music3_state.MiniMaxMusic3Sampler:
     return sampler
 
 
-def test_sampling_reads_this_steps_hidden_states_at_the_logit_rows() -> None:
+@pytest.mark.parametrize("async_chunk", [True, False])
+def test_sampling_reads_this_steps_hidden_states_at_the_logit_rows(async_chunk: bool) -> None:
     sampler = _sampler()
+    sampler.talker.publishes_windows = async_chunk
     hidden = torch.arange(12, dtype=torch.float32).reshape(6, 2)
     stock = _StockSample()
     sampler.talker.tokens = torch.tensor([[7], [7]])
@@ -193,6 +197,13 @@ def test_sampling_reads_this_steps_hidden_states_at_the_logit_rows() -> None:
     # not published next to it (V1 honors omni_pooler_payload_include_hidden).
     assert output.multimodal_outputs is None
     assert output.include_hidden_states is False
+    # Without async_chunk and without hidden states, the V2 runner builds no
+    # per-request payload unless a finalizer is set.
+    if async_chunk:
+        assert output.finalize_multimodal is None
+    else:
+        payload = {"latent": torch.ones(2, 3)}
+        assert output.finalize_multimodal(payload, [1, 1]) is payload
     assert stock.calls == 0
 
 

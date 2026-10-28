@@ -111,7 +111,20 @@ class MiniMaxMusic3Sampler(OmniSampler):
         # The talker sets omni_pooler_payload_include_hidden = False, which V1
         # honors; without this the backbone hidden state would also be
         # published, under the same "latent" key as the song.
-        return OmniSamplingOutput(sampler_output, num_sampled, num_rejected, include_hidden_states=False)
+        #
+        # Without async_chunk the runner builds per-request payloads only for
+        # hidden states or a finalizer, so keep the talker's payload as is.
+        return OmniSamplingOutput(
+            sampler_output,
+            num_sampled,
+            num_rejected,
+            include_hidden_states=False,
+            finalize_multimodal=None if self.talker.publishes_windows else _keep_payload,
+        )
+
+
+def _keep_payload(payload: dict[str, Any], num_sampled: list[int]) -> dict[str, Any]:
+    return payload
 
 
 def create_minimax_music3_talker_model_state(

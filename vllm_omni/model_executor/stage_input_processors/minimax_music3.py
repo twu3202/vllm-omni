@@ -81,6 +81,7 @@ owner of that arithmetic; duplicating it here would let the two copies drift.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -252,12 +253,16 @@ def expand_cfg_prompts(
 # ---------------------------------------------------------------------------
 
 
-def _payload_section(payload: Any, key: str) -> dict[str, Any]:
-    """Return a nested payload section as a dict (empty when absent)."""
-    if not isinstance(payload, dict):
+def _payload_section(payload: Any, key: str) -> Mapping[str, Any]:
+    """Return a nested payload section (empty when absent).
+
+    The engine hands ``ar2acoustic`` a ``MultimodalPayload``, which is a
+    ``Mapping`` but not a ``dict``.
+    """
+    if not isinstance(payload, Mapping):
         return {}
     section = payload.get(key)
-    return section if isinstance(section, dict) else {}
+    return section if isinstance(section, Mapping) else {}
 
 
 def _window_latent(payload: Any) -> torch.Tensor | None:
@@ -267,7 +272,7 @@ def _window_latent(payload: Any) -> torch.Tensor | None:
     talkers that publish through the hidden-state channel instead. A leading
     singleton batch dimension is squeezed so stage 1 sees a stable rank.
     """
-    if not isinstance(payload, dict):
+    if not isinstance(payload, Mapping):
         return None
     tensor = payload.get("latent")
     if not isinstance(tensor, torch.Tensor):
@@ -536,6 +541,10 @@ def ar2acoustic(
             "req_id": [ar_output.request_id],
         }
         published_seed = _payload_section(multimodal_output, "meta").get("audio_seed")
+        # Model Runner V1 hands stage 0's payload over as tensors, so the seed
+        # arrives as a 0-d tensor there and as an int on V2.
+        if isinstance(published_seed, torch.Tensor) and published_seed.numel() == 1:
+            published_seed = int(published_seed.item())
         if isinstance(published_seed, int):
             meta["audio_seed"] = published_seed
 

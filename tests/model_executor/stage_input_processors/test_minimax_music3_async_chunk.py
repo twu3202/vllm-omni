@@ -19,6 +19,7 @@ from vllm_omni.data_entry_keys import OmniPayloadStruct
 from vllm_omni.model_executor.models.minimax_music3.constants import AR_HIDDEN_SIZE, NUM_CODEBOOKS
 from vllm_omni.model_executor.models.minimax_music3.prompt import AUDIO_CODE_OFFSET, SPECIAL_TOKEN_IDS
 from vllm_omni.model_executor.stage_input_processors import minimax_music3 as music3_proc
+from vllm_omni.outputs.mm_outputs import MultimodalPayload
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -96,3 +97,41 @@ def test_terminal_span_while_generation_continues_is_still_reported() -> None:
 
     assert payload.meta.last_chunk is True
     assert _flagged(warnings)
+
+
+@dataclass
+class _Completion:
+    multimodal_output: MultimodalPayload
+
+
+@dataclass
+class _ARRequestOutput:
+    outputs: list
+    request_id: str = "song"
+    finished: bool = True
+
+
+@pytest.mark.parametrize(
+    "published_seed",
+    [torch.tensor(7), 7],
+    ids=["model_runner_v1_tensor", "model_runner_v2_int"],
+)
+def test_whole_song_handoff_reads_the_published_seed(published_seed) -> None:
+    """Without async_chunk the engine hands over the whole song as a
+    ``MultimodalPayload``, with the seed as a 0-d tensor on Model Runner V1."""
+    song = MultimodalPayload.from_dict(
+        {
+            "latent": torch.zeros(250, AR_HIDDEN_SIZE, dtype=torch.bfloat16),
+            "codes": {"audio": torch.zeros(250, NUM_CODEBOOKS, dtype=torch.long)},
+            "meta": {"audio_seed": published_seed, "last_chunk": True},
+        }
+    )
+
+    (prompt,) = music3_proc.ar2acoustic([_ARRequestOutput([_Completion(song)])])
+
+    info = prompt["additional_information"]
+    assert info["meta"]["audio_seed"] == 7
+    assert info["meta"]["codec_chunk_frames"] == 250
+    assert info["latent"].shape == (250, AR_HIDDEN_SIZE)
+    # One placeholder token per 100-frame hop.
+    assert prompt["prompt_token_ids"] == [0, 0, 0]
