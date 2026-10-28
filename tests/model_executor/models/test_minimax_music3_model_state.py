@@ -189,8 +189,10 @@ def test_sampling_reads_this_steps_hidden_states_at_the_logit_rows() -> None:
     assert output.sampler_output.sampled_token_ids.tolist() == [[7], [7]]
     assert output.sampler_output.logprobs_tensors is None
     assert output.num_sampled.tolist() == [1, 1]
-    # The forward's window payload is kept.
+    # The forward's window payload is kept, and the backbone hidden state is
+    # not published next to it (V1 honors omni_pooler_payload_include_hidden).
     assert output.multimodal_outputs is None
+    assert output.include_hidden_states is False
     assert stock.calls == 0
 
 

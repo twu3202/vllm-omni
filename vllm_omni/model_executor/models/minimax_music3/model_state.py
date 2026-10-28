@@ -108,7 +108,10 @@ class MiniMaxMusic3Sampler(OmniSampler):
             req_states.prefill_len.gpu,
         )
         sampler_output = SamplerOutput(output.sampled_token_ids[:num_reqs], None, None, num_sampled, num_rejected)
-        return OmniSamplingOutput(sampler_output, num_sampled, num_rejected)
+        # The talker sets omni_pooler_payload_include_hidden = False, which V1
+        # honors; without this the backbone hidden state would also be
+        # published, under the same "latent" key as the song.
+        return OmniSamplingOutput(sampler_output, num_sampled, num_rejected, include_hidden_states=False)
 
 
 def create_minimax_music3_talker_model_state(
