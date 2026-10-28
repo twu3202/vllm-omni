@@ -13,8 +13,8 @@ Where each V1 input comes from here:
 * ``prepare_runner_inputs`` runs in ``prepare_inputs``, before the forward and
   before a FULL decode graph is replayed, with the batch's own computed and
   scheduled token counts.
-* ``sampling_extra_args`` (CFG role and scale, seed) is read once from the
-  request's sampling params in ``add_request`` and gathered per row.
+* ``sampling_extra_args`` (CFG role and scale, seed) comes from each row's
+  sampling params, which the intermediate buffer keeps per request.
 * ``request_sample_eligible`` marks the rows whose step produces a token, the
   ones that are past their prompt once this step's tokens are computed.
 * ``sample`` runs in the registered sampler's ``sample_step`` on the logits of
@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
-from vllm.v1.core.sched.output import GrammarOutput, NewRequestData
+from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -47,28 +47,6 @@ __all__ = ["MiniMaxMusic3TalkerModelState"]
 
 
 class MiniMaxMusic3TalkerModelState(OmniModelState):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        model: nn.Module,
-        encoder_cache: EncoderCache | None,
-        device: torch.device,
-    ) -> None:
-        super().__init__(vllm_config, model, encoder_cache, device)
-        # Keyed by request slot; a slot is reused only after remove_request.
-        self._extra_args: dict[int, dict[str, Any]] = {}
-
-    def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
-        super().add_request(req_index, new_req_data)
-        params = new_req_data.sampling_params
-        self._extra_args[req_index] = dict(getattr(params, "extra_args", None) or {})
-
-    def remove_request(self, req_index_or_id: int | str) -> None:
-        index = self._resolve_req_index(req_index_or_id)
-        if index is not None:
-            self._extra_args.pop(index, None)
-        super().remove_request(req_index_or_id)
-
     def prepare_inputs(self, input_batch: InputBatch, req_states: RequestState) -> dict[str, Any]:
         inputs = super().prepare_inputs(input_batch, req_states)
         num_reqs = input_batch.num_reqs
@@ -83,12 +61,14 @@ class MiniMaxMusic3TalkerModelState(OmniModelState):
             input_ids=input_batch.input_ids,
             positions=input_batch.positions,
         )
-        slots = input_batch.idx_mapping_np[:num_reqs]
-        inputs["sampling_extra_args"] = [self._extra_args.get(int(slot), {}) for slot in slots]
+        infos = inputs["model_intermediate_buffer"][:num_reqs]
+        inputs["sampling_extra_args"] = [
+            dict(getattr(info.get("sampling_params"), "extra_args", None) or {}) for info in infos
+        ]
         inputs["request_sample_eligible"] = (computed + scheduled >= input_batch.prefill_len_np[:num_reqs]).tolist()
         return inputs
 
-    def custom_sampler(self, sampler: Any) -> tuple[MiniMaxMusic3Sampler, None]:
+    def custom_sampler(self, sampler: Sampler) -> tuple[MiniMaxMusic3Sampler, None]:
         return MiniMaxMusic3Sampler(sampler, self.model), None
 
 

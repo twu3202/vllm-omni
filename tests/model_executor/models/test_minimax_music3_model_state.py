@@ -37,9 +37,13 @@ class _Talker:
         self.logits_input: torch.Tensor | None = None
         self.tokens: torch.Tensor | None = None
 
-    def prepare_runner_inputs(self, **kwargs):
-        self.bound = kwargs
-        return kwargs["input_ids"], kwargs["positions"]
+    def prepare_runner_inputs(self, *, req_ids, num_computed_tokens, num_scheduled_tokens, input_ids, positions):
+        self.bound = {
+            "req_ids": req_ids,
+            "num_computed_tokens": num_computed_tokens,
+            "num_scheduled_tokens": num_scheduled_tokens,
+        }
+        return input_ids, positions
 
     def compute_logits(self, hidden: torch.Tensor) -> torch.Tensor:
         self.logits_input = hidden
@@ -48,14 +52,6 @@ class _Talker:
     def sample(self, logits: torch.Tensor, sampling_metadata: None) -> _Drawn | None:
         assert sampling_metadata is None
         return None if self.tokens is None else _Drawn(self.tokens)
-
-
-@dataclass
-class _NewRequest:
-    """The two ``NewRequestData`` fields the state reads."""
-
-    req_id: str
-    sampling_params: SamplingParams
 
 
 @dataclass
@@ -107,14 +103,7 @@ _REQ_STATES = _ReqStates(_Staged(torch.tensor([100, 100])))
 def _state() -> MiniMaxMusic3TalkerModelState:
     state = object.__new__(MiniMaxMusic3TalkerModelState)
     state.model = _Talker()
-    state._extra_args = {}
     return state
-
-
-def _admit(state, slot: int, extra_args: dict | None) -> None:
-    request = _NewRequest(f"r{slot}", SamplingParams(extra_args=extra_args))
-    with patch.object(OmniModelState, "add_request", return_value=None):
-        state.add_request(slot, request)
 
 
 def _batch(slots, computed, scheduled, prefill_len) -> _PrepareBatch:
@@ -131,41 +120,35 @@ def _batch(slots, computed, scheduled, prefill_len) -> _PrepareBatch:
     )
 
 
-def _prepare(state, batch):
-    with patch.object(OmniModelState, "prepare_inputs", return_value={"model_intermediate_buffer": []}):
+def _prepare(state, batch, buffers):
+    with patch.object(OmniModelState, "prepare_inputs", return_value={"model_intermediate_buffer": buffers}):
         return state.prepare_inputs(batch, req_states=None)
 
 
-def test_rows_are_bound_with_this_steps_counts_and_slot_extra_args() -> None:
+def test_rows_are_bound_with_this_steps_counts_and_their_requests_extra_args() -> None:
     state = _state()
-    _admit(state, 4, {"cfg_role": "cond", "cfg_scale": 1.5, "tts_local_seed": 1})
-    _admit(state, 1, {"cfg_role": "uncond", "cfg_scale": 1.5, "tts_local_seed": 1})
-    _admit(state, 2, None)
-    # Rows are in batch order, which is not slot order: slot 4 finishes its
-    # prompt this step, slot 1 is mid chunked prefill, slot 2 is decoding.
-    batch = _batch(slots=[4, 1, 2], computed=[0, 10, 107], scheduled=[105, 50, 1], prefill_len=[105, 105, 107])
+    # The base state gathers the buffers in batch order, which is not slot
+    # order: slot 4 finishes its prompt this step, slot 1 is mid chunked
+    # prefill, slot 2 is decoding, slot 0 has no sampling params.
+    buffers = [
+        {"sampling_params": SamplingParams(extra_args={"cfg_role": "cond", "cfg_scale": 1.5, "tts_local_seed": 1})},
+        {"sampling_params": SamplingParams(extra_args={"cfg_role": "uncond", "cfg_scale": 1.5, "tts_local_seed": 1})},
+        {"sampling_params": SamplingParams()},
+        {},
+    ]
+    batch = _batch(
+        slots=[4, 1, 2, 0], computed=[0, 10, 107, 107], scheduled=[105, 50, 1, 1], prefill_len=[105, 105, 107, 107]
+    )
 
-    inputs = _prepare(state, batch)
+    inputs = _prepare(state, batch, buffers)
 
     bound = state.model.bound
-    assert bound["req_ids"] == ["r4", "r1", "r2"]
-    assert list(bound["num_computed_tokens"]) == [0, 10, 107]
-    assert list(bound["num_scheduled_tokens"]) == [105, 50, 1]
-    assert [args.get("cfg_role") for args in inputs["sampling_extra_args"]] == ["cond", "uncond", None]
-    assert inputs["request_sample_eligible"] == [True, False, True]
-    assert inputs["model_intermediate_buffer"] == []
-
-
-def test_a_reused_slot_does_not_inherit_the_previous_requests_extra_args() -> None:
-    state = _state()
-    _admit(state, 3, {"cfg_role": "cond", "tts_local_seed": 9})
-    with patch.object(OmniModelState, "remove_request", return_value=None):
-        state.remove_request(3)
-    _admit(state, 3, {"cfg_role": "uncond", "tts_local_seed": 5})
-
-    inputs = _prepare(state, _batch(slots=[3], computed=[200], scheduled=[1], prefill_len=[100]))
-
-    assert inputs["sampling_extra_args"] == [{"cfg_role": "uncond", "tts_local_seed": 5}]
+    assert bound["req_ids"] == ["r4", "r1", "r2", "r0"]
+    assert list(bound["num_computed_tokens"]) == [0, 10, 107, 107]
+    assert list(bound["num_scheduled_tokens"]) == [105, 50, 1, 1]
+    assert [args.get("cfg_role") for args in inputs["sampling_extra_args"]] == ["cond", "uncond", None, None]
+    assert inputs["request_sample_eligible"] == [True, False, True, True]
+    assert inputs["model_intermediate_buffer"] is buffers
 
 
 class _StockSample:

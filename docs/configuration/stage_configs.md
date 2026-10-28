@@ -826,3 +826,9 @@ implementation of its CFG pairing, frame feedback and seeded frame draw for
 both runners; on MRV2 a model state feeds it the batch's rows, counts and
 per-request extra args. Stage 0 keeps `async_scheduling: false` on both runners,
 because both members of a CFG pair must be sampled in the same engine step.
+
+On MRV2 each window reaches stage 1 as its codes, 200 frames x 8 codebooks =
+1600 prompt tokens, where V1 sends one placeholder token. A window is never
+split, so in your own config keep stage 1's `max_num_batched_tokens` at least
+`max_num_seqs` x 1600 on MRV2. With less, a few requests take every step and
+the other streams wait.
