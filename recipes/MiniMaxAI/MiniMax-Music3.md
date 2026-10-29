@@ -106,8 +106,10 @@ response shorter than the cap is the model finishing rather than a truncation.
 - **Model runner:** both stages run on MRV2 on CUDA and on V1 on other
   platforms. For the V1 opt-out and the stage-1 batch budget, see
   [MiniMax-Music3 with Model Runner V2](../../docs/configuration/stage_configs.md#minimax-music3-with-model-runner-v2).
+- **Streaming:** `stream: true` returns SSE events and `stream_format: "audio"`
+  returns raw audio bytes, one window at a time with the default
+  `async_chunk: true`. Use `response_format: "pcm"` when streaming.
 - **Known limitations:**
-    - The external API is non-streaming; `stream: true` is rejected.
     - `max_model_len` is 10,240, so a maximum-length prompt (5,000 tokens) and a
       maximum-length song (9,000 frames) cannot both fit. Long captions shorten
       the maximum song. This is a property of the checkpoint.
@@ -173,4 +175,3 @@ immediately.
 | `voice` | There is no speaker to select; the vocal comes from the caption |
 | `ref_audio`, `ref_text`, `language`, `task_type` | No reference-audio conditioning and no language tag |
 | `speed` | Only `1.0`. Tempo belongs in the caption, e.g. "at 92 BPM" |
-| `stream: true` | The external API is non-streaming |

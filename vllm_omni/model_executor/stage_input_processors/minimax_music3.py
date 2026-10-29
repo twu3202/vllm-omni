@@ -32,11 +32,13 @@ Per emission the talker publishes a multimodal output shaped like::
 The span is normally one window: ``T == AR_CHUNK_FRAMES``, windows advance by
 ``AR_CHUNK_HOP_FRAMES``, and window ``k`` starts at AR frame
 ``k * AR_CHUNK_HOP_FRAMES``. The terminal emission is the exception. A window
-cannot be proven non-final until a further frame exists, so the talker holds
-the most recently completed window back and, on the step where it knows the
-request is ending, publishes the whole remaining frame span at once. That span
-covers up to two windows (the held-back complete one plus the truncated final
-one), so ``T`` can reach ``AR_CHUNK_FRAMES + AR_CHUNK_HOP_FRAMES``. Stage 1
+cannot be proven non-final until a further frame exists, so the talker releases
+each window one frame late and, on the step where it knows the request is
+ending, publishes the whole remaining frame span at once. That span can cover
+two windows (a complete one not yet released plus the truncated final one), but
+it is at most one frame longer than a window: ``T`` reaches
+``AR_CHUNK_FRAMES + 1`` when the frame budget ends the song on the frame that
+would have released the next window. Stage 1
 re-derives the window boundaries inside a span from
 ``meta.num_processed_tokens`` and the span length through
 ``models/minimax_music3/chunking.chunk_windows``.

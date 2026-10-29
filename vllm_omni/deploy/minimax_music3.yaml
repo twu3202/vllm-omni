@@ -126,10 +126,11 @@ stages:
     # the prompt (200 frames x 8 codebooks = 1600 tokens), so the context only
     # has to hold one window.
     max_model_len: 4096
-    # On V2 one step should fit a window for every request (8 x 1600 =
-    # 12800; a song's last span can reach 300 frames, 2400 tokens). A window
-    # is never split, and the scheduler stops at the first window that does
-    # not fit, so a smaller budget lets the same few requests take every step.
+    # On V2 one step should fit a window for every request: a window is 1600
+    # tokens and a song's last window at most 1608, so 8 x 1608 = 12864.
+    # A window is never split, and the scheduler stops at the first window
+    # that does not fit, so a smaller budget lets the same few requests take
+    # every step.
     max_num_batched_tokens: 16384
     devices: "0"
     input_connectors:

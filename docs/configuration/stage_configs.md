@@ -828,7 +828,8 @@ per-request extra args. Stage 0 keeps `async_scheduling: false` on both runners,
 because both members of a CFG pair must be sampled in the same engine step.
 
 On MRV2 each window reaches stage 1 as its codes, 200 frames x 8 codebooks =
-1600 prompt tokens, where V1 sends one placeholder token. A window is never
-split, so in your own config keep stage 1's `max_num_batched_tokens` at least
-`max_num_seqs` x 1600 on MRV2. With less, a few requests take every step and
+1600 prompt tokens, where V1 sends one placeholder token. A song's last window
+can be one frame longer: 201 frames, 1608 tokens. A window is never split, so
+in your own config keep stage 1's `max_num_batched_tokens` at least
+`max_num_seqs` x 1608 on MRV2. With less, a few requests take every step and
 the other streams wait.
