@@ -86,9 +86,15 @@ class _OmniConnectorPayloadTransportMixin(_OmniConnectorRuntimeMixin):
     def _extract_scheduling_metadata_update(
         self, payload: dict[str, Any] | OmniPayload
     ) -> SchedulingMetadataUpdate | None:
-        # Native async receive keeps the built-in interpretation. Configured
-        # adapters remain scoped to the full-payload receive transaction.
-        adapter = DefaultSchedulingMetadataAdapter() if self._async_chunk else self._scheduling_metadata_adapter
+        # Native async receive uses the built-in adapter, with a [codebooks,
+        # frames] codes window scheduled as one placeholder token, as in the V1
+        # chunk transfer adapter. Configured adapters remain scoped to the
+        # full-payload receive transaction.
+        adapter = (
+            DefaultSchedulingMetadataAdapter(window_codes_as_placeholder=True)
+            if self._async_chunk
+            else self._scheduling_metadata_adapter
+        )
         update = adapter.extract(cast(OmniPayload, payload), model_mode=self._model_mode)
         if update is not None and not isinstance(update, SchedulingMetadataUpdate):
             raise TypeError(
