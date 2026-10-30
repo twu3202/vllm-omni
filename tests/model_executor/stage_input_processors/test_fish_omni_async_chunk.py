@@ -75,8 +75,9 @@ def _native_prompt(payload) -> tuple[list[int], bool]:
     transport = Transport.__new__(Transport)
     transport._async_chunk = True
     transport._model_mode = "generation"
-    update = transport._extract_scheduling_metadata_update(to_dict(payload))
-    previous = [0]
+    update = transport._extract_scheduling_metadata_update(payload if isinstance(payload, dict) else to_dict(payload))
+    # Not a possible result, so a handoff that sends no update cannot pass as a window.
+    previous = [7, 7]
     receiver = SimpleNamespace(
         request_id="r",
         prompt_token_ids=list(previous),
@@ -101,6 +102,13 @@ def test_native_mrv2_schedules_one_placeholder_token_per_window():
     prompts.append(_native_prompt(final))
     # The DAC reads the window's codes from runtime info, not from 10 x frames prompt tokens.
     assert prompts == [([0], False)] * 3 + [([0], True)]
+
+
+def test_native_mrv2_window_placeholder_overrides_next_stage_prompt_len():
+    # The coordinator applies the resize first and the prompt ids last, so a window sent with
+    # meta.next_stage_prompt_len is still one token. Fish producers do not set that field.
+    payload = {"codes": {"audio": torch.zeros((10, 96), dtype=torch.long)}, "meta": {"next_stage_prompt_len": 960}}
+    assert _native_prompt(payload) == ([0], False)
 
 
 def test_native_mrv2_empty_final_window_clears_the_prompt():

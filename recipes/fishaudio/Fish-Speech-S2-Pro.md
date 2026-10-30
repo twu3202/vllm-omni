@@ -78,7 +78,8 @@ Notes:
 - On CUDA, stage 1 (the DAC decoder) runs on Model Runner V2 in every Fish
   Speech deploy config, and stage 0 (Slow AR) runs on V1. To run stage 1 on V1,
   set `model_runner: v1` for stage 1 under `platforms.cuda` in a copy of the
-  file.
+  file. A `model_runner` set at the top level or under `stages:` does not
+  override that entry.
 
 #### Verification
 

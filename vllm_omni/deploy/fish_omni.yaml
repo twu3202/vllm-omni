@@ -74,6 +74,9 @@ stages:
       repetition_penalty: 1.0
 
   - stage_id: 1
+    # V1 unless a platform entry below sets model_runner for stage 1. On CUDA,
+    # platforms.cuda sets v2, and a top-level or stages: model_runner does not
+    # override it.
     model_runner: v1
     max_num_seqs: 128
     gpu_memory_utilization: 0.1

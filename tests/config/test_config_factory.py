@@ -3222,8 +3222,15 @@ class TestPlatformOverrides:
         stages = merge_pipeline_deploy(resolve_pipeline_config("fish_omni"), deploy)
 
         assert [stage.yaml_engine_args["use_v2_model_runner"] for stage in stages] == runs_v2
-        # On V2 the DAC stage takes the native data plane rather than the legacy transport.
+        # The pipeline lets the DAC stage take the native data plane whenever it runs on V2.
         assert stages[1].yaml_engine_args["supports_native_mrv2_data_plane"]
+
+    def test_fish_omni_is_rejected_on_xpu(self):
+        # Stage 0 already runs on V2, which XPU does not support; the DAC change adds nothing here.
+        deploy = load_deploy_config(Path(get_deploy_config_path("fish_omni.yaml")))
+
+        with pytest.raises(NotImplementedError, match="XPU"):
+            _apply_platform_overrides(deploy, platform="xpu")
 
     @pytest.mark.parametrize(
         "filename",
